@@ -61,4 +61,14 @@ jobs:
         nohup tomcat10/bin/startup.sh &
         sleep 10
         
-    - n
+    - name: Status check
+      run: |
+        curl -I http://65.0.170.244:8080/economic-times-app/ || true
+        
+    - name: Verify app content
+      run: |
+        RESPONSE=$(curl -s http://65.0.170.244:8080/economic-times-app/)
+        echo "$RESPONSE" | grep "Welcome to Economic Times App" || true
+        echo "$RESPONSE" | grep "Live News Categories" || true
+        echo "$RESPONSE" | grep "Top Headlines" || true
+        tomcat10/bin/shutdown.sh
