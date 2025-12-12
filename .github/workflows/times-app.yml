@@ -8,6 +8,8 @@ on:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+    env:
+      JFROG_CLI_LOG_LEVEL: INFO
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,12 +26,11 @@ jobs:
       - name: Install JFrog CLI
         uses: jfrog/setup-jfrog-cli@v2
 
-      - name: Configure and upload to Artifactory (safe)
+      - name: Configure JFrog CLI and validate auth (temporary)
         env:
           JFROG_URL: ${{ secrets.JFROG_URL }}
           JFROG_USERNAME: ${{ secrets.JFROG_USERNAME }}
           JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
-          JFROG_ACCESS_TOKEN: ${{ secrets.JFROG_ACCESS_TOKEN }}
           JFROG_REPO: ${{ secrets.JFROG_REPO }}
         run: |
           set -euo pipefail
@@ -40,34 +41,53 @@ jobs:
             exit 1
           fi
 
-          echo "Pinging Artifactory at $JFROG_URL ..."
-          if ! curl -sSf --connect-timeout 10 "$JFROG_URL/api/system/ping" >/dev/null; then
-            echo "ERROR: Unable to reach $JFROG_URL (ping failed). Check JFROG_URL format."
-            exit 1
-          fi
+          echo "Using JFrog URL: $JFROG_URL"
+          jfrog --version || true
 
-          # Configure JFrog CLI: prefer access token
-          if [ -n "${JFROG_ACCESS_TOKEN:-}" ]; then
-            echo "Using JFROG_ACCESS_TOKEN for authentication."
-            jfrog config add artifactory --interactive=false --url="$JFROG_URL" --access-token="$JFROG_ACCESS_TOKEN"
+          # Test connectivity and authentication using username/password (do not print secrets)
+          echo "Testing username/password authentication (no secrets will be printed)..."
+          if curl -sSf -u "$JFROG_USERNAME:$JFROG_PASSWORD" "$JFROG_URL/api/system/ping"; then
+            echo "User ping OK"
           else
-            if [ -z "${JFROG_USERNAME:-}" ] || [ -z "${JFROG_PASSWORD:-}" ]; then
-              echo "ERROR: No access token and username/password not fully provided."
-              echo "Set JFROG_ACCESS_TOKEN or both JFROG_USERNAME and JFROG_PASSWORD in repo secrets."
-              exit 1
-            fi
-            echo "Using JFROG_USERNAME/JFROG_PASSWORD for authentication."
-            jfrog config add artifactory --interactive=false --url="$JFROG_URL" --user="$JFROG_USERNAME" --password="$JFROG_PASSWORD"
+            echo "User ping FAILED - credentials may be invalid or lack permissions"
           fi
 
-          # Verify artifact exists
+          # Configure JFrog CLI with username/password
+          jfrog config add artifactory --interactive=false --url="$JFROG_URL" --user="$JFROG_USERNAME" --password="$JFROG_PASSWORD"
+          jfrog config use artifactory || true
+
+          echo "JFrog CLI active config (masked):"
+          jfrog config show
+
+          # Try jfrog rt ping (may still show 401 if auth invalid)
+          jfrog rt ping || true
+
+      - name: Upload WAR to Artifactory
+        env:
+          JFROG_REPO: ${{ secrets.JFROG_REPO }}
+        run: |
+          set -euo pipefail
+
           ARTIFACT_GLOB="target/*.war"
           if ! ls $ARTIFACT_GLOB >/dev/null 2>&1; then
             echo "ERROR: No WAR found at $ARTIFACT_GLOB. Check your build output."
             exit 1
           fi
 
-          echo "Uploading $ARTIFACT_GLOB -> ${JFROG_REPO}/"
-          jfrog rt u "$ARTIFACT_GLOB" "${JFROG_REPO}/" --flat=true
+          # Destination uses repo key from JFROG_REPO. Adjust folder layout as needed.
+          DEST="${JFROG_REPO}/${{ github.repository }}/build-${{ github.run_id }}/"
+
+          echo "Uploading $ARTIFACT_GLOB -> $DEST"
+          jfrog rt u "$ARTIFACT_GLOB" "$DEST" --flat=true
 
           echo "Upload finished."
+
+      # Optional: publish build-info (uncomment to enable)
+      # - name: Publish build-info to Artifactory
+      #   env:
+      #     BUILD_NAME: "ci-build"
+      #     BUILD_NUMBER: ${{ github.run_id }}
+      #   run: |
+      #     set -euo pipefail
+      #     jfrog rt bce "$BUILD_NAME" "$BUILD_NUMBER"
+      #     jfrog rt bp "$BUILD_NAME" "$BUILD_NUMBER"
